@@ -1,0 +1,8 @@
+[versions]
+spring-boot = "4.1.1"
+openapi-generator = "7.14.0"
+
+[libraries]
+# Gradle-плагины как зависимости build-logic; в подпроектах плагины применяются без версии
+spring-boot-gradle-plugin = { module = "org.springframework.boot:spring-boot-gradle-plugin", version.ref = "spring-boot" }
+openapi-generator-gradle-plugin = { module = "org.openapitools:openapi-generator-gradle-plugin", version.ref = "openapi-generator" }

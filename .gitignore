@@ -1,0 +1,13 @@
+# Gradle
+.gradle/
+build/
+.kotlin/
+
+# IntelliJ IDEA
+.idea/
+*.iml
+out/
+
+# Локальное состояние Obsidian и его плагинов
+docs/.obsidian/workspace.json
+docs/.claudian/sessions/
