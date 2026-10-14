@@ -66,7 +66,7 @@ TicketHub — платформа продажи билетов на меропр
 ### Этап 0. Фундамент (1 неделя)
 
 - [x] Монорепозиторий на Gradle: Kotlin DSL, version catalog, `build-logic` с двумя convention plugins — `tickethub.service` и `tickethub.library` (см. [libs.md](libs.md))
-- [ ] Docker Compose с профилями: пока только PostgreSQL и `grafana/otel-lgtm`
+- [x] Docker Compose с профилями: пока только PostgreSQL и `grafana/otel-lgtm`
 - [ ] CI в GitHub Actions: сборка и тесты на каждый PR, защита main, образы в ghcr.io при мерже
 - [ ] Готово: сборка в CI зелёная, `docker compose up` поднимает PostgreSQL и Grafana
 

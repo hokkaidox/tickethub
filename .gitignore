@@ -11,3 +11,7 @@ out/
 # Локальное состояние Obsidian и его плагинов
 docs/.obsidian/workspace.json
 docs/.claudian/sessions/
+
+.env
+.env.*
+!.env.example
