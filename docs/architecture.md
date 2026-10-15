@@ -35,13 +35,14 @@ flowchart TB
     gateway --> order
     gateway --> query
 
+    order -- цены мест --> catalog
     order -- удержать места --> reservation
     order -- создать платёж --> payment
     payment -- REST --> provider
     provider -- вебхук --> payment
 
-    catalog -. изменения каталога,<br/>отмена мероприятия .-> kafka
-    kafka -. отмена мероприятия .-> reservation
+    catalog -. изменения каталога,<br/>публикация и отмена мероприятия .-> kafka
+    kafka -. публикация и<br/>отмена мероприятия .-> reservation
     reservation -. бронь истекла .-> kafka
     payment -. итог платежа .-> kafka
     order -. заказ подтверждён .-> kafka
@@ -64,7 +65,10 @@ flowchart TB
 
 | Шаг | Как | Почему |
 | --- | --- | --- |
+| Клиент → Catalog, Reservation: карта зала | REST | Пользователь ждёт карту. Схема и цены приходят из Catalog через кэш, статусы мест — из Reservation по `seat_id` без кэша |
 | Клиент → Order: создать заказ | REST + Idempotency-Key | Пользователь ждёт номер заказа |
+| Catalog → Reservation: мероприятие опубликовано | Событие в Kafka | Reservation создаёт строки мест мероприятия до начала продаж, никто не ждёт ([ADR-018](adr/0018-seat-ownership.md)) |
+| Order → Catalog: цены мест | Синхронно, REST | Цена фиксируется в заказе в момент создания, пользователь ждёт сумму ([ADR-018](adr/0018-seat-ownership.md)) |
 | Order → Reservation: удержать места | Синхронно, REST | Нужен немедленный ответ, операция быстрая |
 | Order → Payment: создать платёж | Синхронно, REST | Клиенту нужна ссылка на оплату |
 | Payment → провайдер | Синхронно, HTTP | Так устроены API провайдеров |
@@ -117,15 +121,45 @@ sequenceDiagram
 | Сервис | Отвечает за | Хранилище | Как общается |
 | --- | --- | --- | --- |
 | API Gateway | Маршрутизация, проверка JWT, rate limiting; Spring Cloud Gateway Server Web MVC | Redis (счётчики лимитов) | REST от клиентов; проксирует в Catalog, Reservation, Order, Query |
-| Catalog | Мероприятия, площадки, схемы залов | PostgreSQL + кэш Caffeine/Redis | REST; публикует изменения каталога и отмену мероприятия в Kafka |
-| Reservation | Удержание мест с TTL, защита от двойной продажи | PostgreSQL + Redis (holds, Lua) | REST от Gateway и Order; публикует событие «бронь истекла»; слушает отмену мероприятия |
-| Order | Заказы, оркестрация SAGA покупки и отмены мероприятия | PostgreSQL, 2–4 шарда по user_id | REST; синхронно вызывает Reservation и Payment; события через outbox |
+| Catalog | Мероприятия, площадки, схемы залов, список мест мероприятия, цены | PostgreSQL + кэш Caffeine/Redis | REST от клиентов и Order; публикует изменения каталога, публикацию и отмену мероприятия в Kafka |
+| Reservation | Состояние мест (свободно, удержано, продано), удержание с TTL, защита от двойной продажи | PostgreSQL + Redis (holds, Lua) | REST от Gateway и Order; публикует событие «бронь истекла»; слушает публикацию и отмену мероприятия |
+| Order | Заказы и зафиксированные в них цены, оркестрация SAGA покупки и отмены мероприятия | PostgreSQL, 2–4 шарда по user_id | REST; синхронно вызывает Catalog, Reservation и Payment; события через outbox |
 | Payment | Платежи, возвраты, проводки по двойной записи | PostgreSQL, шарды + реплика | REST от Order; синхронно вызывает провайдера, принимает вебхуки; публикует итог платежа |
 | Notification | Письма и пуши | PostgreSQL (inbox) | Только Kafka; SMTP в Mailpit |
 | Query | Поиск мероприятий, история заказов (CQRS) | OpenSearch | REST; читает CDC из Kafka |
 | Fake payment provider | «Злой» внешний провайдер с хаос-режимами | В памяти | REST от Payment, вебхуки в Payment |
 
 Общая инфраструктура: Kafka со Schema Registry (Apicurio), Kafka Connect с Debezium для outbox и CDC, Keycloak для аутентификации и хранения пользователей, OpenTelemetry Collector и стек Grafana (Prometheus, Tempo, Loki). Оплата только картой через провайдера, собственного кошелька нет.
+
+## Места: кто чем владеет
+
+Подробности и отвергнутые варианты — в [ADR-018](adr/0018-seat-ownership.md).
+
+| Что | Владелец | Как узнают остальные |
+| --- | --- | --- |
+| Какие места есть у мероприятия, ряд, сектор, координаты на схеме | Catalog | Reservation получает список `seat_id` из `EventPublished`; клиент читает схему из Catalog |
+| Свободно, удержано или продано | Reservation | Клиент и Order спрашивают Reservation; Catalog о занятости не знает |
+| Цена места | Catalog, пока заказ не создан | Order получает цены синхронно и фиксирует их в заказе |
+| Цена в заказе | Order | Payment получает сумму от Order |
+
+- `seat_id` — непрозрачный UUID от Catalog. Reservation не разбирает его на ряд и место.
+- Список мест замораживается при публикации мероприятия, события об изменении мест нет.
+- Поддерживаются только места с рассадкой, зон без мест (танцпол) нет.
+
+```mermaid
+sequenceDiagram
+    actor A as Администратор
+    participant C as Catalog
+    participant K as Kafka
+    participant R as Reservation
+
+    A->>C: опубликовать мероприятие
+    C->>C: статус «опубликовано», места заморожены,<br/>EventPublished в outbox в той же транзакции
+    C-->>A: 200
+    C-)K: EventPublished (eventId, seatIds)
+    K-)R: EventPublished
+    R->>R: seat_inventory: строка «свободно» на каждое место,<br/>повтор события дублей не создаёт
+```
 
 ## Покупка билета: успешный сценарий
 
@@ -135,6 +169,7 @@ sequenceDiagram
     actor U as Покупатель
     participant G as Gateway
     participant O as Order
+    participant C as Catalog
     participant R as Reservation
     participant P as Payment
     participant FP as Fake provider
@@ -142,6 +177,8 @@ sequenceDiagram
 
     U->>G: POST /orders (Idempotency-Key)
     G->>O: POST /orders
+    O->>C: цены мест (eventId, seatIds)
+    C-->>O: цены, фиксируются в заказе
     O->>R: удержать места (orderId)
     R-->>O: места удержаны на 10 минут
     O->>P: создать платёж (orderId)
@@ -160,4 +197,4 @@ sequenceDiagram
     Note over K: Notification и Query получают OrderConfirmed
 ```
 
-Шаги 1–10 синхронные: пользователь ждёт ссылку на оплату. Дальше процесс идёт по событиям: итог платежа приходит, когда его пришлёт провайдер, и Order завершает сагу уже без участия пользователя. Сценарии отказа (платёж отклонён, провайдер не ответил, бронь истекла) — диаграммы в разделах проектирования этапов Order и Payment в [plan.md](plan.md).
+Шаги 1–12 синхронные: пользователь ждёт ссылку на оплату. Дальше процесс идёт по событиям: итог платежа приходит, когда его пришлёт провайдер, и Order завершает сагу уже без участия пользователя. Сценарии отказа (платёж отклонён, провайдер не ответил, бронь истекла) — диаграммы в разделах проектирования этапов Order и Payment в [plan.md](plan.md).
