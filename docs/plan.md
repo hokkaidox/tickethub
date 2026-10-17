@@ -76,7 +76,7 @@ TicketHub — платформа продажи билетов на меропр
 
 Проектирование:
 
-- [ ] ERD Catalog: мероприятия, площадки, схемы залов, места мероприятия, цены, outbox
+- [x] [ERD Catalog](catalog/erd.md): площадки, неизменяемые схемы залов с сегментами и местами (`seat_no`), мероприятия, цены сегментов, outbox
 - [ ] OpenAPI: `contracts/catalog/openapi.yaml`, включая цены мест для Order
 - [ ] Событие `EventPublished`: топик, ключ, поля — без привязки к формату ([ADR-018](adr/0018-seat-ownership.md))
 
@@ -106,8 +106,8 @@ TicketHub — платформа продажи билетов на меропр
 
 Публикация мероприятия (в Docker Compose добавляется Kafka в режиме KRaft):
 
-- [ ] Публикация мероприятия: после неё список мест не меняется, поддерживаются только места с рассадкой ([ADR-018](adr/0018-seat-ownership.md))
-- [ ] Outbox на polling publisher, payload в JSON: `EventPublished` со списком мест; публикует один экземпляр через ShedLock
+- [ ] Публикация мероприятия: только если у всех сегментов есть цены; схема зала опубликованного мероприятия не меняется, поддерживаются только места с рассадкой ([ADR-018](adr/0018-seat-ownership.md))
+- [ ] Outbox на polling publisher, payload в JSON: `EventPublished` с числом мест; публикует один экземпляр через ShedLock
 - [ ] Готово: Kafka остановлена во время публикации мероприятия, после рестарта `EventPublished` доходит до топика
 
 ### Этап 2. Reservation — бронирование и конкурентность (3 недели)
@@ -117,13 +117,13 @@ TicketHub — платформа продажи билетов на меропр
 Проектирование:
 
 - [ ] State machine брони
-- [ ] ERD Reservation: проекция мест `seat_inventory` по `(event_id, seat_id)` и удержания
+- [ ] ERD Reservation: проекция мест `seat_inventory` по `(event_id, seat_no)` и удержания
 - [ ] OpenAPI: `contracts/reservation/openapi.yaml` — удержать, закрепить, освободить места
 - [ ] C4 L3 Reservation
 
 Реализация:
 
-- [ ] Консьюмер `EventPublished`: строки мест в `seat_inventory`; повторная доставка не создаёт дублей (`INSERT … ON CONFLICT DO NOTHING`), inbox не нужен
+- [ ] Консьюмер `EventPublished`: строки мест в `seat_inventory` через `generate_series(0, seatCount - 1)`; повторная доставка не создаёт дублей (`ON CONFLICT DO NOTHING`), inbox не нужен
 - [ ] Наивная реализация «прочитал → проверил → записал»
 - [ ] Нагрузочный тест, который ловит двойную продажу
 - [ ] Решение 1: optimistic lock
@@ -339,3 +339,4 @@ TicketHub — платформа продажи билетов на меропр
 - [ ] ADR-016. Источник read-модели Query: CDC бизнес-таблиц или события outbox (этап 7)
 - [x] [ADR-017. Keycloak как хранилище пользователей, без собственного сервиса пользователей](adr/0017-keycloak-as-user-store.md)
 - [x] [ADR-018. Места мероприятия: список в Catalog, состояние в Reservation](adr/0018-seat-ownership.md)
+- [x] [ADR-019. Композиция вместо наследования классов](adr/0019-composition-over-inheritance.md)

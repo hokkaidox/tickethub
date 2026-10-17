@@ -68,8 +68,8 @@ flowchart TB
 | Модуль | Что даёт | Этап | Первый → второй пользователь |
 | --- | --- | --- | --- |
 | `build-logic` | Два convention plugin: `tickethub.service` и `tickethub.library` (см. «Сборка») | 0 | Все сервисы и модули `libs/` |
-| `test-support` | Testcontainers-конфигурации (PostgreSQL, Kafka, Redis, Keycloak), ожидание сообщения в топике, настройки Pact | 2 | Catalog → Reservation |
-| `architecture-rules` | Два набора ArchUnit-правил: `layered()` и `hexagonal()` | 2 | Catalog → Reservation |
+| `test-support` | Testcontainers-конфигурации (PostgreSQL, Kafka, Redis, Keycloak), мета-аннотация `@IntegrationTest` вместо базового класса тестов ([ADR-019](adr/0019-composition-over-inheritance.md)), ожидание сообщения в топике, настройки Pact | 2 | Catalog → Reservation |
+| `architecture-rules` | Два набора ArchUnit-правил: `layered()` и `hexagonal()`. Оба включают правило «без наследования классов проекта» ([ADR-019](adr/0019-composition-over-inheritance.md)) | 2 | Catalog → Reservation |
 | `web-starter` | Ошибки в формате ProblemDetail, коды ошибок, базовый `@ControllerAdvice` | 2 | Catalog → Reservation |
 | `security-starter` | JWT resource server, конвертер ролей Keycloak, `CurrentUser`, client credentials для исходящих вызовов | 3 | Order → Catalog, Reservation |
 | `kafka-starter` | Сериализация, стандартные заголовки, дефолты консьюмеров и продюсера, retry-топики и DLT, объявление топиков из конфигурации. Retry-топики и DLT добавляются на этапе 4 | 2 | Catalog → Reservation |
@@ -100,8 +100,8 @@ L — layered, H — hexagonal.
 
 Почему так:
 
-- **Catalog** первым получает Kafka и outbox: с этапа 1 он публикует `EventPublished` со списком мест ([ADR-018](adr/0018-seat-ownership.md)), позже — изменения каталога и отмену мероприятия. Инвалидация L1-кэша идёт после коммита, без outbox.
-- **Reservation** принимает удержание мест от Order с ключом идемпотентности, публикует истечение брони через outbox, слушает отмену мероприятия через inbox. `EventPublished` он слушает без inbox: строки мест вставляются по ключу `(event_id, seat_id)`, и повтор события дублей не создаёт.
+- **Catalog** первым получает Kafka и outbox: с этапа 1 он публикует `EventPublished` с числом мест ([ADR-018](adr/0018-seat-ownership.md)), позже — изменения каталога и отмену мероприятия. Инвалидация L1-кэша идёт после коммита, без outbox.
+- **Reservation** принимает удержание мест от Order с ключом идемпотентности, публикует истечение брони через outbox, слушает отмену мероприятия через inbox. `EventPublished` он слушает без inbox: строки мест вставляются по ключу `(event_id, seat_no)`, и повтор события дублей не создаёт.
 - **Order** использует почти всё: он принимает заказы с Idempotency-Key, вызывает Catalog, Reservation и Payment, слушает итог платежа и истечение брони, публикует события заказа и шардируется.
 - **Payment** принимает вызовы Order с ключом идемпотентности, вызывает провайдера, публикует итог платежа, шардируется. Inbox ему не нужен: событий он не слушает, возврат при отмене мероприятия запрашивает Order ([ADR-012](adr/0012-event-cancellation-orchestration.md)).
 - **Notification** — только консьюмер Kafka, REST у него нет.
