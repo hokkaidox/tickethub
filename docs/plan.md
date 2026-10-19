@@ -77,7 +77,8 @@ TicketHub — платформа продажи билетов на меропр
 Проектирование:
 
 - [x] [ERD Catalog](catalog/erd.md): площадки, неизменяемые схемы залов с сегментами и местами (`seat_no`), мероприятия, цены сегментов, outbox
-- [ ] OpenAPI: `contracts/catalog/openapi.yaml`, включая цены мест для Order
+- [x] OpenAPI: `contracts/catalog/openapi.yaml` по наброску [API Catalog](catalog/api.md): группы `/api`, `/admin`, `/internal`, теги `<группа>-<ресурс>` ([ADR-020](adr/0020-endpoint-groups.md)), включая внутренние цены мест для Order
+- [ ] Правила Spectral в CI: тег и префикс `operationId` соответствуют группе пути, у каждой операции есть ответ `default` со ссылкой на `Problem`
 - [ ] Событие `EventPublished`: топик, ключ, поля — без привязки к формату ([ADR-018](adr/0018-seat-ownership.md))
 
 База:
@@ -154,9 +155,9 @@ TicketHub — платформа продажи билетов на меропр
 Реализация:
 
 - [ ] `POST /orders` с Idempotency-Key, включая гонку двух одинаковых запросов
-- [ ] Цены мест: Order синхронно получает их из Catalog и фиксирует в заказе
+- [ ] Цены мест: Order синхронно получает их из `/internal` Catalog (без кэша, scope `catalog:prices`) и фиксирует в заказе
 - [ ] Keycloak: realm с self-registration и подтверждением email, роли `customer` и `admin`
-- [ ] Keycloak: пользователь из JWT в Order (userId из `sub`, email из токена сохраняется в заказе), защита эндпоинтов Catalog и Reservation
+- [ ] Keycloak: пользователь из JWT в Order (userId из `sub`, email из токена сохраняется в заказе), защита эндпоинтов Catalog и Reservation шаблонами путей `/api`, `/admin`, `/internal` в `security-starter`; запрос вне групп отклоняется
 - [ ] Межсервисная аутентификация: Order получает свой токен через client credentials, Reservation проверяет scope `reservation:hold`; userId передаётся в теле запроса как данные
 - [ ] Синхронный вызов Order → Reservation с таймаутом, retry и ключом идемпотентности `orderId`; Reservation принимает Idempotency-Key
 - [ ] Все сервисы в двух экземплярах
@@ -252,7 +253,7 @@ TicketHub — платформа продажи билетов на меропр
 
 ### Этап 8. Gateway, flash sale и производительность (3 недели)
 
-- [ ] Gateway на Spring Cloud Gateway Server Web MVC: маршруты, проверка JWT
+- [ ] Gateway на Spring Cloud Gateway Server Web MVC: маршруты только для `/api/**` и `/admin/**`, проверка JWT; тест, что `/internal/**` снаружи недоступен
 - [ ] TLS на входе: HTTPS на Gateway, внутри Docker-сети — HTTP
 - [ ] Rate limiting: token bucket в Redis
 - [ ] Виртуальная очередь ожидания на Redis sorted set
@@ -340,3 +341,4 @@ TicketHub — платформа продажи билетов на меропр
 - [x] [ADR-017. Keycloak как хранилище пользователей, без собственного сервиса пользователей](adr/0017-keycloak-as-user-store.md)
 - [x] [ADR-018. Места мероприятия: список в Catalog, состояние в Reservation](adr/0018-seat-ownership.md)
 - [x] [ADR-019. Композиция вместо наследования классов](adr/0019-composition-over-inheritance.md)
+- [x] [ADR-020. Группы эндпоинтов: public, admin, internal](adr/0020-endpoint-groups.md)

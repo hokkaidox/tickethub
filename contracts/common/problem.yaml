@@ -1,0 +1,64 @@
+openapi: 3.1.0
+info:
+  title: TicketHub Problem Details
+  version: 1.0.0
+  description: >
+    Shared error schema based on RFC 9457. Services reference it via
+    $ref: '../common/problem.yaml#/components/schemas/Problem'.
+    Error codes (`code`) are listed in each service's own contract.
+paths: {}
+components:
+  responses:
+    ProblemResponse:
+      description: >
+        Error in RFC 9457 format. Use it for errors the client handles explicitly
+        (e.g. 404, 409) and as the `default` response of every operation, which covers
+        all other errors: 400, 401, 403, 429, 500 (INTERNAL_ERROR), 503.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type; about:blank if no specific type is needed
+          default: about:blank
+        title:
+          type: string
+          description: Short summary of the problem type, the same for every occurrence
+        status:
+          type: integer
+          description: HTTP status code
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+          description: Explanation specific to this occurrence
+        instance:
+          type: string
+          format: uri-reference
+          description: Request path that caused the problem
+        code:
+          type: string
+          description: Business error code, e.g. SEAT_ALREADY_HELD
+          pattern: '^[A-Z][A-Z0-9_]*$'
+        traceId:
+          type: string
+          description: OpenTelemetry trace ID for lookup in Grafana
+        errors:
+          type: array
+          description: Validation errors for request fields
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+      additionalProperties: true

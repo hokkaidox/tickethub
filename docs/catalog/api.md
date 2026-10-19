@@ -1,0 +1,118 @@
+# API Catalog (набросок)
+
+Набросок REST API Catalog, по которому пишется `contracts/catalog/openapi.yaml`. Контракт — источник истины; когда он появится, этот файл описывает только решения, которых в контракте не видно. Модель данных — в [ERD Catalog](erd.md), группы эндпоинтов — в [ADR-020](../adr/0020-endpoint-groups.md).
+
+## Контроллеры и теги
+
+Контроллер — на ресурс и группу, а не на таблицу. Схема зала, её сегменты и места — один неизменяемый агрегат, поэтому у `segment` и `seat` своих контроллеров нет. Цены мероприятия принадлежат контроллерам мероприятия.
+
+Каждый контроллер реализует ровно один интерфейс, сгенерированный по тегу:
+
+| Пакет | Контроллер | Тег → интерфейс |
+| --- | --- | --- |
+| `web/api` | `VenueController` | `venues` → `VenuesApi` |
+| | `LayoutController` | `layouts` → `LayoutsApi` |
+| | `EventController` | `events` → `EventsApi` |
+| `web/admin` | `AdminVenueController` | `admin-venues` → `AdminVenuesApi` |
+| | `AdminLayoutController` | `admin-layouts` → `AdminLayoutsApi` |
+| | `AdminEventController` | `admin-events` → `AdminEventsApi` |
+| `web/internal` | `InternalEventController` | `internal-events` → `InternalEventsApi` |
+
+Почему контроллеры поделены по группам:
+
+- у групп разные гарантии чтения (кэш и только `PUBLISHED`, БД и все статусы, точные цены без кэша); в одном классе легко вызвать не тот метод сервиса, и ошибка будет незаметной;
+- у групп свои DTO и маппинг;
+- пакет на группу даёт границу, которую проверяет ArchUnit: контроллер из `web/admin` реализует только `Admin*Api` и т. д.
+
+Layout отделён от Venue: у площадки тривиальный CRUD, а у схемы самая тяжёлая логика Catalog — проверка рядов, разворачивание мест, запрет удаления используемой схемы, публичное чтение с вечным кэшем.
+
+## Сервисы
+
+Сервисы делятся по ресурсу, а не по группе: группа — понятие транспорта, use case у групп один ([ADR-020](../adr/0020-endpoint-groups.md)).
+
+| Сервис | Что делает |
+| --- | --- |
+| `VenueService` | Создание, изменение, чтение площадок |
+| `LayoutService` | Создание схемы с разворачиванием мест, удаление неиспользуемой, чтение |
+| `EventService` | Создание, цены, публикация и отмена (с outbox), чтение |
+
+Разные гарантии чтения — разные методы одного сервиса. Метод называется по гарантии, а не по вызывающему:
+
+```java
+@Cacheable("events")
+Event getPublished(UUID id);                                     // web/api: кэш, только PUBLISHED
+Event get(UUID id);                                              // web/admin: из БД, все статусы
+List<SeatPrice> pricesFor(UUID eventId, List<Integer> seatNos);  // web/internal: из БД
+```
+
+Если `EventService` разрастётся, он делится на чтение и запись (`EventQueryService`, `EventCommandService`), а не по группам, и только когда действительно разрастётся.
+
+## Эндпоинты
+
+Пути указаны без префикса версии: `/api/v1`, `/admin/v1`, `/internal/v1`.
+
+| Контроллер | `/api` | `/admin` | `/internal` |
+| --- | --- | --- | --- |
+| `VenueController` | `GET /venues`, `GET /venues/{id}` — через кэш | `POST /venues`, `GET /venues`, `GET /venues/{id}`, `PATCH /venues/{id}` — чтение из БД | — |
+| `LayoutController` | `GET /layouts/{id}` — схема, сегменты и места | `POST /venues/{venueId}/layouts`, `GET /venues/{venueId}/layouts`, `DELETE /layouts/{id}` | — |
+| `EventController` | `GET /events` — афиша, `GET /events/{id}`, `GET /events/{id}/prices` — только `PUBLISHED`, через кэш | `POST /events`, `GET /events?status=…`, `GET /events/{id}`, `PATCH /events/{id}`, `PUT /events/{id}/prices`, `POST /events/{id}/publish`, `POST /events/{id}/cancel` — чтение из БД, все статусы | `GET /events/{id}/prices?seatNo=…` — из БД, без кэша, scope `catalog:prices` |
+
+Списки (`GET /venues`, `GET /events`, `GET /venues/{venueId}/layouts`) отдаются с курсорной пагинацией: параметры `Cursor` и `Limit` из `contracts/common/pagination.yaml`, у каждого списка своя схема страницы (`VenuePage`, `EventPage`, `LayoutPage`) вида `{ "items": [...], "nextCursor": "…" }`. Курсор непрозрачный, внутри ключ сортировки:
+
+| Список | Сортировка и ключ курсора |
+| --- | --- |
+| Афиша `GET /api/v1/events` | По дате начала: `(starts_at, id)` |
+| Мероприятия в админке `GET /admin/v1/events` | По дате начала: `(starts_at, id)` |
+| Площадки, схемы залов | По времени создания: `id` (UUIDv7) |
+
+## Чтение в админке и публичное чтение
+
+У изменяемых ресурсов (площадка, мероприятие) чтение в админке отдельное от публичного, хотя оба метода вызывают один use case:
+
+- **Свои изменения видны сразу.** Публичное чтение идёт через L1 и L2 с TTL. Администратор после `PATCH` увидел бы старые данные; админка читает из БД.
+- **Админка видит всё.** Публичная афиша отдаёт только `PUBLISHED`, черновики и отменённые мероприятия видны только в `/admin`.
+
+У неизменяемой схемы зала чтения в админке нет: устаревать нечему, черновиков нет, хватает публичного `GET /layouts/{id}`.
+
+## Создание схемы зала
+
+Схема создаётся целиком одним запросом вместе с сегментами и местами:
+
+```http
+POST /admin/v1/venues/{venueId}/layouts
+```
+
+```json
+{
+  "name": "Big hall",
+  "segments": [
+    { "key": "PARTERRE", "name": "Parterre" },
+    { "key": "BALCONY", "name": "Balcony" }
+  ],
+  "rows": [
+    { "section": "A", "row": "1", "from": 1, "to": 30, "segment": "PARTERRE" },
+    { "section": "A", "row": "2", "from": 1, "to": 30, "segment": "PARTERRE" },
+    { "section": "B", "row": "1", "from": 1, "to": 25, "segment": "BALCONY" }
+  ]
+}
+```
+
+- `key` сегмента живёт только внутри запроса, чтобы ряды могли на него сослаться. UUID сегментам присваивает сервер.
+- Места передаются диапазонами по рядам: стадион на 50 000 мест — около 2 000 рядов, а не 50 000 элементов.
+- Сервер разворачивает диапазоны в строки `seat` и присваивает `seat_no` от 0 до N−1 в порядке рядов запроса.
+- Изменения схемы нет. Удалить схему можно, только пока на неё не ссылается ни одно мероприятие, иначе 409.
+
+`GET /api/v1/layouts/{id}` отдаёт схему целиком. Ответ никогда не меняется, поэтому кэшируется без TTL.
+
+## Мероприятие
+
+- `POST /admin/v1/events` создаёт мероприятие в статусе `DRAFT` на заданной схеме (`layoutId`).
+- `PUT /admin/v1/events/{id}/prices` заменяет цены целиком: `[{ "segmentId", "price", "currency" }]`. Замена целиком идемпотентна сама по себе. Сегмент должен принадлежать схеме мероприятия, иначе 422. Цены можно менять и после публикации.
+- Публикация и отмена — отдельные действия, а не `PATCH status`: у них есть проверки и побочные эффекты.
+  - `POST …/publish`: только из `DRAFT` и только если у всех сегментов есть цены; пишет `EventPublished` в outbox. Повторный вызов на опубликованном мероприятии возвращает 200 без нового события.
+  - `POST …/cancel`: пишет `EventCancelled` в outbox ([ADR-012](../adr/0012-event-cancellation-orchestration.md)).
+- `GET /internal/v1/events/{id}/prices?seatNo=…` возвращает точную цену по каждому месту (место → сегмент → цена) для фиксации в заказе.
+
+## Документация контракта
+
+Для навигации в Swagger UI или Redoc теги группируются расширением `x-tagGroups` (Public, Admin, Internal). Генератор его игнорирует.

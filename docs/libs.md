@@ -27,7 +27,7 @@
 
 | Плагин | Для кого | Что делает |
 | --- | --- | --- |
-| `tickethub.service` | Сервисы | Java 25, Spring Boot (`bootJar`), BOM Spring Boot, actuator и observability, JUnit Platform. Если есть `contracts/<сервис>/openapi.yaml`, генерирует из него интерфейсы контроллеров и модели (`interfaceOnly`, без клиентов) |
+| `tickethub.service` | Сервисы | Java 25, Spring Boot (`bootJar`), BOM Spring Boot, actuator и observability, JUnit Platform. Если есть `contracts/<сервис>/openapi.yaml`, генерирует из него интерфейсы контроллеров и модели (`interfaceOnly`, без клиентов). Схема `Problem` из `contracts/common/problem.yaml` не генерируется, а отображается на `ProblemDetail` из Spring (`schemaMappings`) |
 | `tickethub.library` | Модули `libs/` | Java 25, `java-library`, BOM Spring Boot, процессоры автоконфигурации, JUnit Platform |
 
 Плагинов два, по одному на вид подпроекта. Несколько повторяющихся строк (toolchain, тесты) дешевле, чем общий базовый плагин.
@@ -69,9 +69,9 @@ flowchart TB
 | --- | --- | --- | --- |
 | `build-logic` | Два convention plugin: `tickethub.service` и `tickethub.library` (см. «Сборка») | 0 | Все сервисы и модули `libs/` |
 | `test-support` | Testcontainers-конфигурации (PostgreSQL, Kafka, Redis, Keycloak), мета-аннотация `@IntegrationTest` вместо базового класса тестов ([ADR-019](adr/0019-composition-over-inheritance.md)), ожидание сообщения в топике, настройки Pact | 2 | Catalog → Reservation |
-| `architecture-rules` | Два набора ArchUnit-правил: `layered()` и `hexagonal()`. Оба включают правило «без наследования классов проекта» ([ADR-019](adr/0019-composition-over-inheritance.md)) | 2 | Catalog → Reservation |
-| `web-starter` | Ошибки в формате ProblemDetail, коды ошибок, базовый `@ControllerAdvice` | 2 | Catalog → Reservation |
-| `security-starter` | JWT resource server, конвертер ролей Keycloak, `CurrentUser`, client credentials для исходящих вызовов | 3 | Order → Catalog, Reservation |
+| `architecture-rules` | Два набора ArchUnit-правил: `layered()` и `hexagonal()`. Оба включают правило «без наследования классов проекта» ([ADR-019](adr/0019-composition-over-inheritance.md)). Код, сгенерированный из OpenAPI, из проверок исключён | 2 | Catalog → Reservation |
+| `web-starter` | Ошибки в формате ProblemDetail (RFC 9457): `ErrorCode`, `Problems`, `GlobalErrorHandler`, `ProblemEnricher` (см. «Обработка ошибок»). `CursorCodec` для курсорной пагинации: переводит `ScrollPosition` из Spring Data в непрозрачный курсор и обратно, проверяет `limit`, на испорченный курсор отвечает 400 `INVALID_CURSOR` | 2 | Catalog → Reservation |
+| `security-starter` | JWT resource server, конвертер ролей Keycloak, `CurrentUser`, client credentials для исходящих вызовов, правила доступа по группам эндпоинтов `/api`, `/admin`, `/internal` ([ADR-020](adr/0020-endpoint-groups.md)) | 3 | Order → Catalog, Reservation |
 | `kafka-starter` | Сериализация, стандартные заголовки, дефолты консьюмеров и продюсера, retry-топики и DLT, объявление топиков из конфигурации. Retry-топики и DLT добавляются на этапе 4 | 2 | Catalog → Reservation |
 | `outbox-starter` | `OutboxWriter`, таблица outbox и её миграция, polling publisher: один активный экземпляр через ShedLock, чтобы сохранить порядок событий агрегата | 3 | Catalog → Order |
 | `idempotency-starter` | Фильтр Idempotency-Key: хранение ответа, гонка двух одинаковых запросов, 409 при другом теле | 3 | Order → Reservation |
@@ -124,6 +124,26 @@ flowchart BT
 
 `web-starter`, `idempotency-starter` и `sharding-starter` ни от кого не зависят.
 
+## Обработка ошибок
+
+Формат ошибки один для всех сервисов — Problem Details по RFC 9457, схема в `contracts/common/problem.yaml`. Формат целиком принадлежит `web-starter`, а какие ошибки бывают и какие у них коды — решает сервис.
+
+| Где | Что |
+| --- | --- |
+| `web-starter` | `ErrorCode` — интерфейс: код, HTTP-статус, `title` |
+| | `Problems` — собирает `ProblemDetail` из `ErrorCode` и `detail`, при необходимости с дополнительными полями |
+| | `GlobalErrorHandler` — общие случаи: ошибки валидации → 400 с `errors: [{field, message}]`, нечитаемое тело → 400, неизвестное исключение → 500 без деталей наружу. Наследует `ResponseEntityExceptionHandler` (разрешено [ADR-019](adr/0019-composition-over-inheritance.md)) |
+| | `ProblemEnricher` — `ResponseBodyAdvice`, который дописывает `traceId` и `instance` в любой `ProblemDetail`, кто бы его ни создал |
+| Домен сервиса | Свои исключения без зависимостей от HTTP и стартеров: `EventNotFoundException`, `SeatAlreadyHeldException` |
+| Веб-слой сервиса (`web/` в layered, `adapter/in/web/` в hexagonal) | Enum кодов, реализующий `ErrorCode`, и свой `@RestControllerAdvice`: одна строка на доменное исключение, `Problems.of(CatalogError.EVENT_NOT_FOUND, e.getMessage())` |
+
+Правила:
+
+- Доменный advice переиспользует стартер вызовом `Problems`, а не наследованием `GlobalErrorHandler`: наследник получил бы копию общих обработчиков.
+- `GlobalErrorHandler` стоит последним (`@Order(Ordered.LOWEST_PRECEDENCE)`). Spring берёт первый advice с подходящим обработчиком, и общий «любое исключение → 500» иначе перехватил бы доменные ошибки. Тест в `web-starter`: при двух advice доменное исключение не превращается в 500.
+- HTTP-статус появляется только в веб-слое. То же доменное исключение в консьюмере Kafka означает не 404, а пропуск события или DLT.
+- Если доменных обработчиков станет много, следующий шаг — бин `ErrorCodeMapping` (исключение → `ErrorCode`), который читает `GlobalErrorHandler`. Тогда доменные advice не нужны. Вводится по ситуации, не раньше второго сервиса.
+
 ## Что намеренно не вынесено
 
 | Кандидат | Почему нет |
@@ -132,7 +152,10 @@ flowchart BT
 | Кэширование | Используется только в Catalog, и это тема этапа 1. Стартер спрятал бы то, что изучается |
 | Саги | Оркестратор один — Order ([ADR-003](adr/0003-purchase-saga-orchestration.md)). Обобщённый движок саг — это самодельный Temporal |
 | UUIDv7, ShedLock | Достаточно зависимости. ShedLock подключают `outbox-starter` и сервисы с задачами по расписанию |
-| Общие модели и исключения | Доменные типы у каждого сервиса свои, DTO генерируются из контрактов, обработка ошибок — в `web-starter` |
+| Общие модели и исключения | Доменные типы у каждого сервиса свои, DTO генерируются из контрактов, обработка ошибок — в `web-starter`. Формат ошибки — стандартный `ProblemDetail` из Spring, своего класса `GeneralError` нет |
+| Общий справочник кодов ошибок | Каждый новый код в любом сервисе менял бы общую библиотеку. Коды — enum сервиса, в `web-starter` только интерфейс `ErrorCode`; потребитель сам решает, на какие коды владельца реагировать |
+| Общие исключения (`NotFoundException`, `ConflictException`) | Их бросает домен, и он стал бы зависеть от веб-стартера, то есть от HTTP; `hexagonal()` это запрещает. К тому же общее исключение всё равно требует конкретного кода (`EVENT_NOT_FOUND`), и от него остаётся только статус. Если понадобится нейтральная категория ошибки без HTTP, она выносится в отдельный модуль на чистой Java (`error-api`), а не в `web-starter` |
+| Тип страницы (`Page<T>`) | Сервисный слой зависел бы от веб-стартера. Репозиторий и сервис используют `Window<T>` и `ScrollPosition` из Spring Data; `CursorCodec` переводит их в курсор только в контроллере. Можно ли порту hexagonal-сервиса возвращать `Window`, решается на этапе 2 |
 
 ## Открытые вопросы
 

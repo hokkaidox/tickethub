@@ -68,7 +68,7 @@ flowchart TB
 | Клиент → Catalog, Reservation: карта зала | REST | Пользователь ждёт карту. Схема и цены приходят из Catalog через кэш, статусы мест — из Reservation по `seat_no` без кэша |
 | Клиент → Order: создать заказ | REST + Idempotency-Key | Пользователь ждёт номер заказа |
 | Catalog → Reservation: мероприятие опубликовано | Событие в Kafka | Reservation создаёт строки мест мероприятия до начала продаж, никто не ждёт ([ADR-018](adr/0018-seat-ownership.md)) |
-| Order → Catalog: цены мест | Синхронно, REST | Цена фиксируется в заказе в момент создания, пользователь ждёт сумму ([ADR-018](adr/0018-seat-ownership.md)) |
+| Order → Catalog: цены мест | Синхронно, REST, `/internal` без кэша | Цена фиксируется в заказе в момент создания, пользователь ждёт сумму ([ADR-018](adr/0018-seat-ownership.md), [ADR-020](adr/0020-endpoint-groups.md)) |
 | Order → Reservation: удержать места | Синхронно, REST | Нужен немедленный ответ, операция быстрая |
 | Order → Payment: создать платёж | Синхронно, REST | Клиенту нужна ссылка на оплату |
 | Payment → провайдер | Синхронно, HTTP | Так устроены API провайдеров |
@@ -88,7 +88,7 @@ Keycloak выдаёт токены двум видам клиентов: пол�
 | Кто | Как получает токен | Что в токене |
 | --- | --- | --- |
 | Пользователь (браузер, Gatling) | Authorization Code + PKCE; в тестах — password grant | `sub` = userId, `email`, роль `customer` или `admin` |
-| Сервис (Order, Payment) | Client credentials | `azp` = имя сервиса, scopes вида `reservation:hold`, `payment:create` |
+| Сервис (Order, Payment) | Client credentials | `azp` = имя сервиса, scopes вида `reservation:hold`, `payment:create`, `catalog:prices` |
 
 Межсервисный вызов идёт с токеном вызывающего сервиса, а не пользователя: шаги саги часто запускаются событием из Kafka или по расписанию, когда пользовательского токена нет. Принимающий сервис проверяет подпись токена по JWKS Keycloak и нужный scope. userId передаётся в теле запроса как данные, а не как личность вызывающего.
 
@@ -100,7 +100,7 @@ sequenceDiagram
 
     O->>KC: client credentials (order-service)
     KC-->>O: JWT со scope reservation:hold, кэшируется до истечения
-    O->>R: POST /holds, Bearer JWT, Idempotency-Key
+    O->>R: POST /internal/v1/holds, Bearer JWT, Idempotency-Key
     R->>R: проверка подписи по JWKS и scope
     R-->>O: 201, места удержаны
 ```
@@ -108,6 +108,8 @@ sequenceDiagram
 | Уровень защиты | Как | Этап |
 | --- | --- | --- |
 | Доступ к БД | Отдельная база и отдельный пользователь PostgreSQL для каждого сервиса | 1 |
+| Группы эндпоинтов | Правила доступа по префиксу пути: `/api`, `/admin`, `/internal` | 3 |
+| Внутренние эндпоинты снаружи | Gateway не проксирует `/internal/**` | 8 |
 | Пользователь → сервисы | JWT пользователя из Keycloak | 3 |
 | Сервис → сервис | JWT client credentials + проверка scope | 3 |
 | Провайдер → Payment | HMAC-подпись вебхука, проверка срока давности | 5 |
@@ -116,11 +118,31 @@ sequenceDiagram
 
 Внутри Docker-сети сервисы общаются по HTTP без TLS. Это осознанный компромисс: шифрование между сервисами в реальных системах обеспечивает инфраструктура (service mesh), а не код приложения, а права каждого сервиса и так ограничены scopes его токена.
 
+### Группы эндпоинтов
+
+Эндпоинты сервиса делятся по префиксу пути ([ADR-020](adr/0020-endpoint-groups.md)). Правила доступа задаются шаблонами путей, поэтому новый эндпоинт защищён по умолчанию.
+
+| Префикс | Кто вызывает | Через Gateway | Авторизация |
+| --- | --- | --- | --- |
+| `/api/v1/...` | Покупатель | Да | JWT пользователя, роль `customer`; чтение афиши — анонимно |
+| `/admin/v1/...` | Администратор | Да | JWT пользователя, роль `admin` |
+| `/internal/v1/...` | Сервисы TicketHub | Нет | JWT client credentials и scope |
+| `/webhooks/...` | Fake provider → Payment | Нет | HMAC-подпись |
+
+| Сервис | `/api` | `/admin` | `/internal` |
+| --- | --- | --- | --- |
+| Catalog | Афиша, схема зала, цены (через кэш) | Площадки, схемы залов, мероприятия, цены, публикация, отмена | Цены мест для Order, из БД без кэша (`catalog:prices`) |
+| Reservation | Статусы мест для карты зала | — | Удержать, закрепить, освободить места (`reservation:hold`) |
+| Order | Создать заказ, мои заказы | — | — |
+| Payment | — | — | Создать платёж, возврат (`payment:create`) |
+
+Цены — пример того, зачем группы разделены не только ради доступа: клиенту для карты зала подходит цена из кэша, а Order фиксирует цену в заказе и получает точную из БД.
+
 ## Сервисы
 
 | Сервис | Отвечает за | Хранилище | Как общается |
 | --- | --- | --- | --- |
-| API Gateway | Маршрутизация, проверка JWT, rate limiting; Spring Cloud Gateway Server Web MVC | Redis (счётчики лимитов) | REST от клиентов; проксирует в Catalog, Reservation, Order, Query |
+| API Gateway | Маршрутизация, проверка JWT, rate limiting; Spring Cloud Gateway Server Web MVC | Redis (счётчики лимитов) | REST от клиентов; проксирует `/api/**` и `/admin/**` в Catalog, Reservation, Order, Query, но не `/internal/**` |
 | Catalog | Мероприятия, площадки, неизменяемые схемы залов с местами, цены сегментов ([ERD](catalog/erd.md)) | PostgreSQL + кэш Caffeine/Redis | REST от клиентов и Order; публикует изменения каталога, публикацию и отмену мероприятия в Kafka |
 | Reservation | Состояние мест (свободно, удержано, продано), удержание с TTL, защита от двойной продажи | PostgreSQL + Redis (holds, Lua) | REST от Gateway и Order; публикует событие «бронь истекла»; слушает публикацию и отмену мероприятия |
 | Order | Заказы и зафиксированные в них цены, оркестрация SAGA покупки и отмены мероприятия | PostgreSQL, 2–4 шарда по user_id | REST; синхронно вызывает Catalog, Reservation и Payment; события через outbox |

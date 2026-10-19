@@ -1,0 +1,194 @@
+openapi: 3.1.0
+
+info:
+  title: Catalog Service API
+  description: >
+    Venues, hall layouts, events and prices. Endpoint groups by path prefix:
+    /api for customers, /admin for administrators, /internal for other TicketHub services.
+  version: 1.0.0
+
+servers:
+  - url: http://{host}:{port}
+    description: >
+      API Gateway for /api and /admin, or the Catalog service directly
+      (the only way to reach /internal; the gateway does not route it).
+    variables:
+      host:
+        default: localhost
+      port:
+        default: "8080"
+
+tags:
+  - name: venues
+    description: Public venues API
+  - name: admin-venues
+    description: Admin venues API
+
+paths:
+  /api/v1/venues:
+    get:
+      tags: [venues]
+      summary: List venues
+      operationId: getVenues
+      parameters:
+        - $ref: '../common/pagination.yaml#/components/parameters/Cursor'
+        - $ref: '../common/pagination.yaml#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/VenuePageResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /api/v1/venues/{venueId}:
+    get:
+      tags: [venues]
+      summary: Get a venue by id
+      operationId: getVenue
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+      responses:
+        '200': { $ref: '#/components/responses/VenueResponse' }
+        '404': { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/venues:
+    get:
+      tags: [admin-venues]
+      summary: List venues
+      operationId: adminGetVenues
+      parameters:
+        - $ref: '../common/pagination.yaml#/components/parameters/Cursor'
+        - $ref: '../common/pagination.yaml#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/VenuePageResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+    post:
+      tags: [admin-venues]
+      summary: Create a venue
+      operationId: adminCreateVenue
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateVenueRequest'
+      responses:
+        '201':
+          description: The venue was created.
+          headers:
+            Location:
+              description: URL of the created venue
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Venue'
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/venues/{venueId}:
+    get:
+      tags: [admin-venues]
+      summary: Get a venue by id
+      description: Reads from the database, bypassing the cache.
+      operationId: adminGetVenue
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+      responses:
+        '200': { $ref: '#/components/responses/VenueResponse' }
+        '404': { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+    patch:
+      tags: [admin-venues]
+      summary: Update a venue
+      description: Only the fields present in the request are changed.
+      operationId: adminUpdateVenue
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateVenueRequest'
+      responses:
+        '200': { $ref: '#/components/responses/VenueResponse' }
+        '404': { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+components:
+  parameters:
+    VenueId:
+      name: venueId
+      in: path
+      required: true
+      description: Venue id
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    VenueResponse:
+      description: A venue
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Venue'
+    VenuePageResponse:
+      description: A page of venues
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/VenuePage'
+
+  schemas:
+    Venue:
+      type: object
+      required: [id, name, address]
+      properties:
+        id:
+          type: string
+          format: uuid
+          example: 01887e44-8d4a-7186-b452-f47a61d87e0b
+        name:
+          type: string
+          example: "KinoPark #5"
+        address:
+          type: string
+          example: "Astana, Korgalzhin 1"
+    VenuePage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Venue'
+        nextCursor:
+          type: string
+          description: Opaque cursor of the next page, passed as `cursor`; absent on the last page
+    CreateVenueRequest:
+      type: object
+      required: [name, address]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: "KinoPark #5"
+        address:
+          type: string
+          minLength: 1
+          maxLength: 500
+          example: "Astana, Korgalzhin 1"
+    UpdateVenueRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+        address:
+          type: string
+          minLength: 1
+          maxLength: 500

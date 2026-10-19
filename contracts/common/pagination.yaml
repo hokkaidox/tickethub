@@ -1,0 +1,34 @@
+openapi: 3.1.0
+info:
+  title: TicketHub Pagination
+  version: 1.0.0
+  description: >
+    Shared cursor pagination parameters. Services reference them via
+    $ref: '../common/pagination.yaml#/components/parameters/Cursor' (and Limit).
+    Each list response defines its own page schema, e.g.
+    VenuePage { items: Venue[], nextCursor: string }, where nextCursor is a plain
+    string described as the cursor of the next page and absent on the last page.
+    Do not build page schemas with allOf: it turns into class inheritance in generated code.
+paths: {}
+components:
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: >
+        Opaque cursor from `nextCursor` of the previous page. Omit it to get the first page.
+        Clients must not build or parse it: its format is not part of the contract and may
+        change without a new API version. An invalid cursor is rejected with 400 INVALID_CURSOR.
+      schema:
+        type: string
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Maximum number of items on the page
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
