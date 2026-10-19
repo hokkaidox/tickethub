@@ -255,6 +255,7 @@ TicketHub — платформа продажи билетов на меропр
 
 - [ ] Gateway на Spring Cloud Gateway Server Web MVC: маршруты только для `/api/**` и `/admin/**`, проверка JWT; тест, что `/internal/**` снаружи недоступен
 - [ ] TLS на входе: HTTPS на Gateway, внутри Docker-сети — HTTP
+- [ ] gzip на Gateway: `server.compression` для `application/json` и `application/problem+json` от 2 КБ; сервисы ответы не сжимают. Проверка: `GET /api/v1/layouts/{id}` на 50 000 мест уходит клиенту сжатым
 - [ ] Rate limiting: token bucket в Redis
 - [ ] Виртуальная очередь ожидания на Redis sorted set
 - [ ] Сквозной тест «50 000 мест за минуту»

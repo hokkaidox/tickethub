@@ -142,7 +142,7 @@ sequenceDiagram
 
 | Сервис | Отвечает за | Хранилище | Как общается |
 | --- | --- | --- | --- |
-| API Gateway | Маршрутизация, проверка JWT, rate limiting; Spring Cloud Gateway Server Web MVC | Redis (счётчики лимитов) | REST от клиентов; проксирует `/api/**` и `/admin/**` в Catalog, Reservation, Order, Query, но не `/internal/**` |
+| API Gateway | Маршрутизация, проверка JWT, rate limiting, gzip ответов клиенту; Spring Cloud Gateway Server Web MVC | Redis (счётчики лимитов) | REST от клиентов; проксирует `/api/**` и `/admin/**` в Catalog, Reservation, Order, Query, но не `/internal/**` |
 | Catalog | Мероприятия, площадки, неизменяемые схемы залов с местами, цены сегментов ([ERD](catalog/erd.md)) | PostgreSQL + кэш Caffeine/Redis | REST от клиентов и Order; публикует изменения каталога, публикацию и отмену мероприятия в Kafka |
 | Reservation | Состояние мест (свободно, удержано, продано), удержание с TTL, защита от двойной продажи | PostgreSQL + Redis (holds, Lua) | REST от Gateway и Order; публикует событие «бронь истекла»; слушает публикацию и отмену мероприятия |
 | Order | Заказы и зафиксированные в них цены, оркестрация SAGA покупки и отмены мероприятия | PostgreSQL, 2–4 шарда по user_id | REST; синхронно вызывает Catalog, Reservation и Payment; события через outbox |

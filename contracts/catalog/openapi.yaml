@@ -23,6 +23,10 @@ tags:
     description: Public venues API
   - name: admin-venues
     description: Admin venues API
+  - name: layouts
+    description: Public hall layouts API
+  - name: admin-layouts
+    description: Admin hall layouts API
 
 paths:
   /api/v1/venues:
@@ -46,7 +50,9 @@ paths:
         - $ref: '#/components/parameters/VenueId'
       responses:
         '200': { $ref: '#/components/responses/VenueResponse' }
-        '404': { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: VENUE_NOT_FOUND
         default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
 
   /admin/v1/venues:
@@ -95,7 +101,9 @@ paths:
         - $ref: '#/components/parameters/VenueId'
       responses:
         '200': { $ref: '#/components/responses/VenueResponse' }
-        '404': { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: VENUE_NOT_FOUND
         default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
     patch:
       tags: [admin-venues]
@@ -112,7 +120,98 @@ paths:
               $ref: '#/components/schemas/UpdateVenueRequest'
       responses:
         '200': { $ref: '#/components/responses/VenueResponse' }
-        '404': { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: VENUE_NOT_FOUND
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /api/v1/layouts/{layoutId}:
+    get:
+      tags: [layouts]
+      summary: Get a hall layout with its segments and seats
+      description: A layout never changes, so the response can be cached without expiration.
+      operationId: getLayout
+      parameters:
+        - $ref: '#/components/parameters/LayoutId'
+      responses:
+        '200': { $ref: '#/components/responses/LayoutResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: LAYOUT_NOT_FOUND
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/venues/{venueId}/layouts:
+    get:
+      tags: [admin-layouts]
+      summary: List layouts of a venue
+      operationId: adminGetLayouts
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+        - $ref: '../common/pagination.yaml#/components/parameters/Cursor'
+        - $ref: '../common/pagination.yaml#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/LayoutPageResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: VENUE_NOT_FOUND
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+    post:
+      tags: [admin-layouts]
+      summary: Create a hall layout
+      description: >
+        Creates the layout in one request together with its segments and seats.
+        Seats are passed as ranges per row; the server expands them and assigns seatNo
+        from 0 to N-1 in the order of the rows in the request. A layout cannot be changed
+        after creation, including its segments: a changed hall is a new layout.
+      operationId: adminCreateLayout
+      parameters:
+        - $ref: '#/components/parameters/VenueId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateLayoutRequest'
+      responses:
+        '201':
+          description: The layout was created.
+          headers:
+            Location:
+              description: URL of the created layout
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Layout'
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: VENUE_NOT_FOUND
+        '422':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: >
+            INVALID_LAYOUT: a row references an unknown segment key, a segment key is repeated,
+            a segment has no rows, `from` is greater than `to`, or a seat appears twice
+            (the same section, row and number; an absent section or row counts as equal).
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/layouts/{layoutId}:
+    delete:
+      tags: [admin-layouts]
+      summary: Delete an unused layout
+      operationId: adminDeleteLayout
+      parameters:
+        - $ref: '#/components/parameters/LayoutId'
+      responses:
+        '204':
+          description: The layout was deleted.
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: LAYOUT_NOT_FOUND
+        '409':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: 'LAYOUT_IN_USE: an event references the layout'
         default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
 
 components:
@@ -122,6 +221,14 @@ components:
       in: path
       required: true
       description: Venue id
+      schema:
+        type: string
+        format: uuid
+    LayoutId:
+      name: layoutId
+      in: path
+      required: true
+      description: Layout id
       schema:
         type: string
         format: uuid
@@ -139,6 +246,18 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/VenuePage'
+    LayoutResponse:
+      description: A layout with its segments and seats
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Layout'
+    LayoutPageResponse:
+      description: A page of layouts without seats
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/LayoutPage'
 
   schemas:
     Venue:
@@ -192,3 +311,163 @@ components:
           type: string
           minLength: 1
           maxLength: 500
+
+    Layout:
+      type: object
+      required: [id, venueId, name, seatCount, segments, seats]
+      properties:
+        id:
+          type: string
+          format: uuid
+        venueId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Big hall
+        seatCount:
+          type: integer
+          minimum: 1
+          description: Number of seats N; seatNo runs from 0 to N-1
+          example: 85
+        segments:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/Segment'
+        seats:
+          type: array
+          description: All seats ordered by seatNo
+          items:
+            $ref: '#/components/schemas/Seat'
+    LayoutSummary:
+      type: object
+      required: [id, name, seatCount]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Big hall
+        seatCount:
+          type: integer
+          minimum: 1
+          example: 85
+    LayoutPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/LayoutSummary'
+        nextCursor:
+          type: string
+          description: Opaque cursor of the next page, passed as `cursor`; absent on the last page
+    Segment:
+      type: object
+      description: Price zone of a layout. Every seat belongs to exactly one segment.
+      required: [id, name]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: Parterre
+    Seat:
+      type: object
+      required: [seatNo, segmentId, number]
+      properties:
+        seatNo:
+          type: integer
+          minimum: 0
+          description: Technical seat number from 0 to N-1, used by Reservation and Order
+          example: 0
+        segmentId:
+          type: string
+          format: uuid
+        section:
+          type: string
+          description: Section printed on the ticket; absent if the hall has no sections
+          example: A
+        row:
+          type: string
+          description: Row printed on the ticket; absent if the hall has no rows
+          example: "1"
+        number:
+          type: string
+          description: Seat number printed on the ticket
+          example: "1"
+    CreateLayoutRequest:
+      type: object
+      required: [name, segments, rows]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: Big hall
+        segments:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: Every segment must be used by at least one row.
+          items:
+            $ref: '#/components/schemas/SegmentDefinition'
+        rows:
+          type: array
+          minItems: 1
+          maxItems: 10000
+          description: >
+            Seat ranges per row. Seats get seatNo from 0 to N-1 in the order of this list.
+          items:
+            $ref: '#/components/schemas/RowDefinition'
+    SegmentDefinition:
+      type: object
+      required: [key, name]
+      properties:
+        key:
+          type: string
+          pattern: '^[A-Z][A-Z0-9_]*$'
+          maxLength: 50
+          description: >
+            Key unique within the request, referenced by rows. It is not stored:
+            the server assigns segment ids.
+          example: PARTERRE
+        name:
+          type: string
+          minLength: 1
+          maxLength: 100
+          example: Parterre
+    RowDefinition:
+      type: object
+      required: [from, to, segment]
+      properties:
+        section:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Omit if the hall has no sections
+          example: A
+        row:
+          type: string
+          minLength: 1
+          maxLength: 50
+          description: Omit if the hall has no rows
+          example: "1"
+        from:
+          type: integer
+          minimum: 1
+          description: First seat number in the row, inclusive
+          example: 1
+        to:
+          type: integer
+          minimum: 1
+          description: Last seat number in the row, inclusive
+          example: 30
+        segment:
+          type: string
+          description: Key of a segment from `segments`
+          example: PARTERRE
