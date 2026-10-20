@@ -74,7 +74,7 @@ flowchart TB
 | `security-starter` | JWT resource server, конвертер ролей Keycloak, `CurrentUser`, client credentials для исходящих вызовов, правила доступа по группам эндпоинтов `/api`, `/admin`, `/internal` ([ADR-020](adr/0020-endpoint-groups.md)) | 3 | Order → Catalog, Reservation |
 | `kafka-starter` | Сериализация, стандартные заголовки, дефолты консьюмеров и продюсера, retry-топики и DLT, объявление топиков из конфигурации. Retry-топики и DLT добавляются на этапе 4 | 2 | Catalog → Reservation |
 | `outbox-starter` | `OutboxWriter`, таблица outbox и её миграция, polling publisher: один активный экземпляр через ShedLock, чтобы сохранить порядок событий агрегата | 3 | Catalog → Order |
-| `idempotency-starter` | Фильтр Idempotency-Key: хранение ответа, гонка двух одинаковых запросов, 409 при другом теле | 3 | Order → Reservation |
+| `idempotency-starter` | Фильтр Idempotency-Key: хранение ответа 24 часа, ключ в паре с вызывающим (`sub`), обязательный или необязательный заголовок по эндпоинту, 409 `REQUEST_IN_PROGRESS` при гонке двух одинаковых запросов, 422 `IDEMPOTENCY_KEY_REUSED` при другом теле | 3 | Catalog (админские `POST`) → Order |
 | `inbox-starter` | Дедупликация консьюмеров, таблица inbox с ключом `(consumer, message_id)` и её миграция | 4 | Order → Notification |
 | `http-client-starter` | Разбор ошибок в ProblemDetail, дефолтные таймауты, токен client credentials из `security-starter` | 5 | Order → Payment |
 | `sharding-starter` | Роутинг `DataSource` по хэшу user_id, конфигурация шардов | 6 | Order → Payment |
@@ -94,13 +94,13 @@ L — layered, H — hexagonal.
 | `kafka-starter` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | | |
 | `inbox-starter` | | ✓ | ✓ | | ✓ | | | |
 | `outbox-starter` | ✓ | ✓ | ✓ | ✓ | | | | |
-| `idempotency-starter` | | ✓ | ✓ | ✓ | | | | |
+| `idempotency-starter` | ✓ | ✓ | ✓ | ✓ | | | | |
 | `http-client-starter` | | | ✓ | ✓ | | | | |
 | `sharding-starter` | | | ✓ | ✓ | | | | |
 
 Почему так:
 
-- **Catalog** первым получает Kafka и outbox: с этапа 1 он публикует `EventPublished` с числом мест ([ADR-018](adr/0018-seat-ownership.md)), позже — изменения каталога и отмену мероприятия. Инвалидация L1-кэша идёт после коммита, без outbox.
+- **Catalog** первым получает Kafka и outbox: с этапа 1 он публикует `EventPublished` с числом мест ([ADR-018](adr/0018-seat-ownership.md)), позже — изменения каталога и отмену мероприятия. Инвалидация L1-кэша идёт после коммита, без outbox. Первым получает и идемпотентность: необязательный `Idempotency-Key` на админских `POST` создания.
 - **Reservation** принимает удержание мест от Order с ключом идемпотентности, публикует истечение брони через outbox, слушает отмену мероприятия через inbox. `EventPublished` он слушает без inbox: строки мест вставляются по ключу `(event_id, seat_no)`, и повтор события дублей не создаёт.
 - **Order** использует почти всё: он принимает заказы с Idempotency-Key, вызывает Catalog, Reservation и Payment, слушает итог платежа и истечение брони, публикует события заказа и шардируется.
 - **Payment** принимает вызовы Order с ключом идемпотентности, вызывает провайдера, публикует итог платежа, шардируется. Inbox ему не нужен: событий он не слушает, возврат при отмене мероприятия запрашивает Order ([ADR-012](adr/0012-event-cancellation-orchestration.md)).

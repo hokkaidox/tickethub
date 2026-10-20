@@ -27,6 +27,12 @@ tags:
     description: Public hall layouts API
   - name: admin-layouts
     description: Admin hall layouts API
+  - name: events
+    description: Public events API
+  - name: admin-events
+    description: Admin events API
+  - name: internal-events
+    description: Events API for other TicketHub services
 
 paths:
   /api/v1/venues:
@@ -70,6 +76,8 @@ paths:
       tags: [admin-venues]
       summary: Create a venue
       operationId: adminCreateVenue
+      parameters:
+        - $ref: '../common/idempotency.yaml#/components/parameters/OptionalIdempotencyKey'
       requestBody:
         required: true
         content:
@@ -108,7 +116,9 @@ paths:
     patch:
       tags: [admin-venues]
       summary: Update a venue
-      description: Only the fields present in the request are changed.
+      description: >
+        Only the fields present in the request are changed. A new currency applies only
+        to events created afterwards: an event keeps the currency it was created with.
       operationId: adminUpdateVenue
       parameters:
         - $ref: '#/components/parameters/VenueId'
@@ -166,6 +176,7 @@ paths:
       operationId: adminCreateLayout
       parameters:
         - $ref: '#/components/parameters/VenueId'
+        - $ref: '../common/idempotency.yaml#/components/parameters/OptionalIdempotencyKey'
       requestBody:
         required: true
         content:
@@ -214,6 +225,270 @@ paths:
           description: 'LAYOUT_IN_USE: an event references the layout'
         default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
 
+  /api/v1/events:
+    get:
+      tags: [events]
+      summary: List published events
+      description: >
+        Published events ordered by start time. By default only upcoming events are returned.
+        The cursor is bound to the filters: a cursor obtained with other filters is rejected
+        with 400 INVALID_CURSOR.
+      operationId: getEvents
+      parameters:
+        - $ref: '#/components/parameters/VenueFilter'
+        - $ref: '#/components/parameters/StartsFrom'
+        - $ref: '#/components/parameters/StartsTo'
+        - $ref: '../common/pagination.yaml#/components/parameters/Cursor'
+        - $ref: '../common/pagination.yaml#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/EventPageResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /api/v1/events/{eventId}:
+    get:
+      tags: [events]
+      summary: Get a published event
+      operationId: getEvent
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200': { $ref: '#/components/responses/EventResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: 'EVENT_NOT_FOUND: the event does not exist or is not published'
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /api/v1/events/{eventId}/prices:
+    get:
+      tags: [events]
+      summary: Get segment prices of a published event
+      description: >
+        Served from the cache and may lag behind a price change. The price fixed in an order
+        comes from the internal endpoint, not from this one.
+      operationId: getEventPrices
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200': { $ref: '#/components/responses/EventPricesResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: 'EVENT_NOT_FOUND: the event does not exist or is not published'
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/events:
+    get:
+      tags: [admin-events]
+      summary: List events in any status
+      description: >
+        Reads from the database. Includes drafts, cancelled and past events.
+        The cursor is bound to the filters.
+      operationId: adminGetEvents
+      parameters:
+        - $ref: '#/components/parameters/StatusFilter'
+        - $ref: '#/components/parameters/VenueFilter'
+        - $ref: '#/components/parameters/StartsFrom'
+        - $ref: '#/components/parameters/StartsTo'
+        - $ref: '../common/pagination.yaml#/components/parameters/Cursor'
+        - $ref: '../common/pagination.yaml#/components/parameters/Limit'
+      responses:
+        '200': { $ref: '#/components/responses/AdminEventPageResponse' }
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+    post:
+      tags: [admin-events]
+      summary: Create a draft event
+      description: >
+        Creates the event in status DRAFT on the given layout. The event takes the currency
+        of the layout's venue and keeps it.
+      operationId: adminCreateEvent
+      parameters:
+        - $ref: '../common/idempotency.yaml#/components/parameters/OptionalIdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEventRequest'
+      responses:
+        '201':
+          description: The event was created.
+          headers:
+            Location:
+              description: URL of the created event
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AdminEvent'
+        '422':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: >
+            LAYOUT_NOT_FOUND: the layout does not exist.
+            INVALID_EVENT: `endsAt` is not after `startsAt`.
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/events/{eventId}:
+    get:
+      tags: [admin-events]
+      summary: Get an event in any status
+      description: Reads from the database, bypassing the cache.
+      operationId: adminGetEvent
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200': { $ref: '#/components/responses/AdminEventResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_NOT_FOUND
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+    patch:
+      tags: [admin-events]
+      summary: Update an event
+      description: >
+        Only the fields present in the request are changed. A draft can change every field;
+        changing the layout removes the prices, since they belong to the old layout's segments.
+        A published event can change only the description: the title, the dates and the seats
+        are printed on sold tickets. A cancelled event cannot be changed.
+      operationId: adminUpdateEvent
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateEventRequest'
+      responses:
+        '200': { $ref: '#/components/responses/AdminEventResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_NOT_FOUND
+        '409':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: >
+            EVENT_FIELD_FROZEN: the event is published and the request changes a field other
+            than the description. EVENT_CANCELLED: the event is cancelled.
+        '422':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: >
+            LAYOUT_NOT_FOUND: the new layout does not exist.
+            INVALID_EVENT: `endsAt` is not after `startsAt`.
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/events/{eventId}/prices:
+    put:
+      tags: [admin-events]
+      summary: Replace segment prices of an event
+      description: >
+        Replaces all prices of the event; segments missing from the request lose their price.
+        Amounts are in the event currency. Allowed for drafts and published events;
+        an order keeps the price it was created with.
+      operationId: adminReplaceEventPrices
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceEventPricesRequest'
+      responses:
+        '200': { $ref: '#/components/responses/EventPricesResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_NOT_FOUND
+        '409':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_CANCELLED
+        '422':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: >
+            INVALID_PRICES: a segment does not belong to the event layout or is repeated.
+            Removing a price of a published event's segment is also rejected,
+            since its seats would become unsellable.
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/events/{eventId}/publish:
+    post:
+      tags: [admin-events]
+      summary: Publish a draft event
+      description: >
+        Moves the event from DRAFT to PUBLISHED and sends EventPublished. Every segment
+        of the layout must have a price. Publishing an already published event returns
+        200 and sends nothing.
+      operationId: adminPublishEvent
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200': { $ref: '#/components/responses/AdminEventResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_NOT_FOUND
+        '409':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_CANCELLED
+        '422':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: 'PRICES_INCOMPLETE: some segments of the layout have no price'
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /admin/v1/events/{eventId}/cancel:
+    post:
+      tags: [admin-events]
+      summary: Cancel an event
+      description: >
+        Moves the event to CANCELLED. A published event sends EventCancelled, which starts
+        refunds; a draft is cancelled without an event, since nobody knows about it.
+        Cancelling an already cancelled event returns 200 and sends nothing.
+      operationId: adminCancelEvent
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+      responses:
+        '200': { $ref: '#/components/responses/AdminEventResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_NOT_FOUND
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
+  /internal/v1/events/{eventId}/prices:
+    get:
+      tags: [internal-events]
+      summary: Get exact prices of seats
+      description: >
+        Price of every requested seat (seat, its segment, the segment price) read from the
+        database without the cache, so that Order fixes the current price. Requires scope
+        catalog:prices.
+      operationId: internalGetSeatPrices
+      parameters:
+        - $ref: '#/components/parameters/EventId'
+        - name: seatNo
+          in: query
+          required: true
+          description: Technical seat numbers, e.g. ?seatNo=0&seatNo=1
+          style: form
+          explode: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            uniqueItems: true
+            items:
+              type: integer
+              minimum: 0
+      responses:
+        '200': { $ref: '#/components/responses/SeatPricesResponse' }
+        '404':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: EVENT_NOT_FOUND
+        '409':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: 'EVENT_NOT_ON_SALE: the event is a draft or cancelled'
+        '422':
+          $ref: '../common/problem.yaml#/components/responses/ProblemResponse'
+          description: 'SEAT_NOT_FOUND: a seatNo is not less than the seat count of the layout'
+        default: { $ref: '../common/problem.yaml#/components/responses/ProblemResponse' }
+
 components:
   parameters:
     VenueId:
@@ -232,6 +507,47 @@ components:
       schema:
         type: string
         format: uuid
+    EventId:
+      name: eventId
+      in: path
+      required: true
+      description: Event id
+      schema:
+        type: string
+        format: uuid
+    VenueFilter:
+      name: venueId
+      in: query
+      required: false
+      description: Only events at this venue
+      schema:
+        type: string
+        format: uuid
+    StartsFrom:
+      name: from
+      in: query
+      required: false
+      description: >
+        Only events starting at or after this moment. In the public list it defaults to
+        the current time; in the admin list there is no default.
+      schema:
+        type: string
+        format: date-time
+    StartsTo:
+      name: to
+      in: query
+      required: false
+      description: Only events starting before this moment
+      schema:
+        type: string
+        format: date-time
+    StatusFilter:
+      name: status
+      in: query
+      required: false
+      description: Only events in this status
+      schema:
+        $ref: '#/components/schemas/EventStatus'
 
   responses:
     VenueResponse:
@@ -258,11 +574,64 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/LayoutPage'
+    EventResponse:
+      description: A published event
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Event'
+    EventPageResponse:
+      description: A page of published events
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EventPage'
+    EventPricesResponse:
+      description: Segment prices of an event
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/EventPrices'
+    AdminEventResponse:
+      description: An event in any status, with its prices
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AdminEvent'
+    AdminEventPageResponse:
+      description: A page of events in any status
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/AdminEventPage'
+    SeatPricesResponse:
+      description: Exact prices of the requested seats
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/SeatPrices'
 
   schemas:
+    Money:
+      type: object
+      description: >
+        Amount of money. The amount is a decimal string with two fractional digits,
+        so that clients never parse it as a floating-point number.
+      required: [amount, currency]
+      properties:
+        amount:
+          type: string
+          pattern: '^\d{1,10}\.\d{2}$'
+          example: "5000.00"
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217 currency code
+          example: KZT
+
     Venue:
       type: object
-      required: [id, name, address]
+      required: [id, name, address, timeZone, currency]
       properties:
         id:
           type: string
@@ -274,6 +643,15 @@ components:
         address:
           type: string
           example: "Astana, Korgalzhin 1"
+        timeZone:
+          type: string
+          description: IANA time zone; event times are shown in it
+          example: Asia/Almaty
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217 currency of new events at this venue
+          example: KZT
     VenuePage:
       type: object
       required: [items]
@@ -287,7 +665,7 @@ components:
           description: Opaque cursor of the next page, passed as `cursor`; absent on the last page
     CreateVenueRequest:
       type: object
-      required: [name, address]
+      required: [name, address, timeZone, currency]
       properties:
         name:
           type: string
@@ -299,6 +677,17 @@ components:
           minLength: 1
           maxLength: 500
           example: "Astana, Korgalzhin 1"
+        timeZone:
+          type: string
+          minLength: 1
+          maxLength: 64
+          description: IANA time zone; an unknown zone is rejected with 400
+          example: Asia/Almaty
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: ISO 4217 code; an unknown code is rejected with 400
+          example: KZT
     UpdateVenueRequest:
       type: object
       minProperties: 1
@@ -311,6 +700,14 @@ components:
           type: string
           minLength: 1
           maxLength: 500
+        timeZone:
+          type: string
+          minLength: 1
+          maxLength: 64
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: Applies only to events created afterwards
 
     Layout:
       type: object
@@ -471,3 +868,249 @@ components:
           type: string
           description: Key of a segment from `segments`
           example: PARTERRE
+
+    EventStatus:
+      type: string
+      enum: [DRAFT, PUBLISHED, CANCELLED]
+    Event:
+      type: object
+      description: A published event. Times carry the UTC offset of the venue time zone.
+      required: [id, venueId, layoutId, title, startsAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        venueId:
+          type: string
+          format: uuid
+        layoutId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: Imagine Dragons
+        description:
+          type: string
+        startsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T19:00:00+05:00"
+        endsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T22:00:00+05:00"
+    EventSummary:
+      type: object
+      description: An event in the public list
+      required: [id, venueId, venueName, title, startsAt, minPrice]
+      properties:
+        id:
+          type: string
+          format: uuid
+        venueId:
+          type: string
+          format: uuid
+        venueName:
+          type: string
+          example: Astana Arena
+        title:
+          type: string
+          example: Imagine Dragons
+        startsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T19:00:00+05:00"
+        minPrice:
+          $ref: '#/components/schemas/Money'
+          description: The lowest segment price, for "from 5 000 KZT"
+    EventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/EventSummary'
+        nextCursor:
+          type: string
+          description: Opaque cursor of the next page, passed as `cursor`; absent on the last page
+    EventPrices:
+      type: object
+      required: [eventId, prices]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        prices:
+          type: array
+          description: One price per segment that has one
+          items:
+            $ref: '#/components/schemas/SegmentPrice'
+    SegmentPrice:
+      type: object
+      required: [segmentId, price]
+      properties:
+        segmentId:
+          type: string
+          format: uuid
+        price:
+          $ref: '#/components/schemas/Money'
+    AdminEvent:
+      type: object
+      description: An event in any status, with its prices. Times carry the venue UTC offset.
+      required: [id, venueId, layoutId, title, status, startsAt, currency, prices]
+      properties:
+        id:
+          type: string
+          format: uuid
+        venueId:
+          type: string
+          format: uuid
+        layoutId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: Imagine Dragons
+        description:
+          type: string
+        status:
+          $ref: '#/components/schemas/EventStatus'
+        startsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T19:00:00+05:00"
+        endsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T22:00:00+05:00"
+        currency:
+          type: string
+          pattern: '^[A-Z]{3}$'
+          description: Taken from the venue when the event was created; never changes
+          example: KZT
+        prices:
+          type: array
+          description: Segments without a price are absent
+          items:
+            $ref: '#/components/schemas/SegmentPrice'
+    AdminEventSummary:
+      type: object
+      required: [id, venueId, title, status, startsAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        venueId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          example: Imagine Dragons
+        status:
+          $ref: '#/components/schemas/EventStatus'
+        startsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T19:00:00+05:00"
+    AdminEventPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminEventSummary'
+        nextCursor:
+          type: string
+          description: Opaque cursor of the next page, passed as `cursor`; absent on the last page
+    CreateEventRequest:
+      type: object
+      required: [layoutId, title, startsAt]
+      properties:
+        layoutId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+          example: Imagine Dragons
+        description:
+          type: string
+          maxLength: 5000
+        startsAt:
+          type: string
+          format: date-time
+          description: Any UTC offset is accepted; responses use the venue offset
+          example: "2026-12-01T19:00:00+05:00"
+        endsAt:
+          type: string
+          format: date-time
+          example: "2026-12-01T22:00:00+05:00"
+    UpdateEventRequest:
+      type: object
+      minProperties: 1
+      description: For a published event only `description` may be present.
+      properties:
+        layoutId:
+          type: string
+          format: uuid
+        title:
+          type: string
+          minLength: 1
+          maxLength: 200
+        description:
+          type: string
+          maxLength: 5000
+        startsAt:
+          type: string
+          format: date-time
+        endsAt:
+          type: string
+          format: date-time
+    ReplaceEventPricesRequest:
+      type: object
+      required: [prices]
+      properties:
+        prices:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/PriceDefinition'
+    PriceDefinition:
+      type: object
+      required: [segmentId, amount]
+      properties:
+        segmentId:
+          type: string
+          format: uuid
+        amount:
+          type: string
+          pattern: '^\d{1,10}(\.\d{1,2})?$'
+          description: Amount in the event currency
+          example: "5000"
+    SeatPrices:
+      type: object
+      required: [eventId, prices]
+      properties:
+        eventId:
+          type: string
+          format: uuid
+        prices:
+          type: array
+          description: One entry per requested seat
+          items:
+            $ref: '#/components/schemas/SeatPrice'
+    SeatPrice:
+      type: object
+      required: [seatNo, segmentId, price]
+      properties:
+        seatNo:
+          type: integer
+          minimum: 0
+        segmentId:
+          type: string
+          format: uuid
+        price:
+          $ref: '#/components/schemas/Money'
