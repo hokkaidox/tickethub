@@ -14,9 +14,9 @@ TicketHub — платформа продажи билетов на меропр
 | --- | --- | --- | --- |
 | Кэширование | Catalog | 1 | Cache-aside, TTL с jitter, защита от stampede, negative caching, L1 + L2 с инвалидацией, горячие ключи, метрика hit rate |
 | Конкурентность | Reservation | 2 | Optimistic lock, `SELECT … FOR UPDATE SKIP LOCKED`, Lua-скрипты в Redis, распределённые локи и fencing token |
-| Идемпотентность | Order, Reservation, Payment | 3–5 | Idempotency-Key, outbox, inbox, идемпотентный producer, условные апдейты по статусу |
+| Идемпотентность | Catalog, Order, Reservation, Payment | 1–5 | Idempotency-Key, outbox, inbox, идемпотентный producer, условные апдейты по статусу |
 | SAGA | Order, Reservation, Payment | 3, 5 | Оркестрация покупки с синхронными и асинхронными шагами, оркестрация отмены мероприятия с той же компенсацией, таймауты |
-| Kafka | Шина | 3–4 | Ключи партиционирования, consumer groups, retry-топики и DLT, Schema Registry, эволюция схем, consumer lag |
+| Kafka | Шина | 1–4 | Ключи партиционирования, consumer groups, retry-топики и DLT, Schema Registry, эволюция схем, consumer lag |
 | CDC | Outbox, Query | 4, 7 | Debezium: outbox → Kafka, бизнес-таблицы → OpenSearch |
 | Отказоустойчивость | Синхронные вызовы | 3, 5, 9 | Таймауты, retry с backoff и jitter, circuit breaker, bulkhead |
 | Шардирование | Order, Payment | 6 | Роутинг по хэшу user_id, UUIDv7 как глобальный ID, кросс-шардовые запросы, решардинг |
@@ -30,7 +30,7 @@ TicketHub — платформа продажи билетов на меропр
 
 - **Один этап — один сервис.** Сквозные этапы (фундамент, шардирование, производительность, хаос) идут отдельно и только когда сервисов для них уже достаточно.
 - **Проектирование — в начале этапа и только для его сервиса.** ERD, OpenAPI, state machine и sequence-диаграммы рисуются для сервиса, который сейчас в работе. Следующие сервисы проектируются, когда до них дойдёт очередь, уже с опытом предыдущих.
-- **Инфраструктура появляется на том этапе, где она нужна.** На этапе 1 в Docker Compose только PostgreSQL, Redis и Grafana; Kafka добавляется на этапе 3.
+- **Инфраструктура появляется на том этапе, где она нужна.** На этапе 1 в Docker Compose добавляются Redis и Kafka (Catalog публикует мероприятия для Reservation), на этапе 3 — Keycloak.
 - **Общие модули выносятся при втором использовании** (правила — в [libs.md](libs.md)). В каждом этапе указано, какие модули выносятся на нём.
 - **После любого этапа можно остановиться** с работающей системой и тестом, который доказывает результат.
 - **Сначала воспроизвести проблему** под нагрузкой и увидеть её в Grafana, потом чинить.
@@ -76,13 +76,16 @@ TicketHub — платформа продажи билетов на меропр
 
 Проектирование:
 
-- [ ] ERD Catalog: мероприятия, площадки, схемы залов
-- [ ] OpenAPI: `contracts/catalog/openapi.yaml`
+- [x] [ERD Catalog](catalog/erd.md): площадки, неизменяемые схемы залов с сегментами и местами (`seat_no`), мероприятия, цены сегментов, outbox
+- [x] OpenAPI: `contracts/catalog/openapi.yaml` по наброску [API Catalog](catalog/api.md): группы `/api`, `/admin`, `/internal`, теги `<группа>-<ресурс>` ([ADR-020](adr/0020-endpoint-groups.md)), включая внутренние цены мест для Order
+- [ ] Правила Spectral в CI: тег и префикс `operationId` соответствуют группе пути, у каждой операции есть ответ `default` со ссылкой на `Problem`
+- [ ] Событие `EventPublished`: топик, ключ, поля — без привязки к формату ([ADR-018](adr/0018-seat-ownership.md))
 
 База:
 
 - [ ] Эндпоинты мероприятий и площадок, API-first: контроллеры реализуют интерфейсы, сгенерированные из OpenAPI
 - [ ] Flyway-миграции, UUIDv7 как идентификатор
+- [ ] Необязательный `Idempotency-Key` на админских `POST` создания: повтор получает сохранённый ответ, другое тело — 422, гонка двух одинаковых запросов — 409 ([API Catalog](catalog/api.md))
 - [ ] Отдельная база и отдельный пользователь PostgreSQL для Catalog: правило «чужую БД не читать» подкреплено правами доступа
 - [ ] Интеграционные тесты с Testcontainers и `@ServiceConnection`, ArchUnit-правила layered
 - [ ] Трейсы, метрики и логи Catalog в Grafana
@@ -103,6 +106,12 @@ TicketHub — платформа продажи билетов на меропр
 - [ ] Инвалидация L1 через Redis pub/sub после коммита, короткий TTL как страховка
 - [ ] Готово: запрос виден в Grafana как трейс; график hit rate L1 и L2; сравнение p99 без кэша, с L2 и с L1 + L2; тест «не больше одного похода в БД на протухший ключ на экземпляр»; тест «после изменения оба экземпляра отдают новые данные не позже TTL L1»
 
+Публикация мероприятия (в Docker Compose добавляется Kafka в режиме KRaft):
+
+- [ ] Публикация мероприятия: только если у всех сегментов есть цены; схема зала опубликованного мероприятия не меняется, поддерживаются только места с рассадкой ([ADR-018](adr/0018-seat-ownership.md))
+- [ ] Outbox на polling publisher, payload в JSON: `EventPublished` с числом мест; публикует один экземпляр через ShedLock
+- [ ] Готово: Kafka остановлена во время публикации мероприятия, после рестарта `EventPublished` доходит до топика
+
 ### Этап 2. Reservation — бронирование и конкурентность (3 недели)
 
 Архитектура: умеренный hexagonal; порт `SeatHoldStore` с тремя адаптерами.
@@ -110,12 +119,13 @@ TicketHub — платформа продажи билетов на меропр
 Проектирование:
 
 - [ ] State machine брони
-- [ ] ERD Reservation
+- [ ] ERD Reservation: проекция мест `seat_inventory` по `(event_id, seat_no)` и удержания
 - [ ] OpenAPI: `contracts/reservation/openapi.yaml` — удержать, закрепить, освободить места
 - [ ] C4 L3 Reservation
 
 Реализация:
 
+- [ ] Консьюмер `EventPublished`: строки мест в `seat_inventory` через `generate_series(0, seatCount - 1)`; повторная доставка не создаёт дублей (`ON CONFLICT DO NOTHING`), inbox не нужен
 - [ ] Наивная реализация «прочитал → проверил → записал»
 - [ ] Нагрузочный тест, который ловит двойную продажу
 - [ ] Решение 1: optimistic lock
@@ -124,7 +134,7 @@ TicketHub — платформа продажи билетов на меропр
 - [ ] Истечение брони по TTL и освобождение мест (пока без события в Kafka)
 - [ ] Готово: 10 000 одновременных попыток на 500 мест дают ровно 500 продаж; таблица throughput и p99 для трёх решений; ADR-007 по итогам сравнения
 
-Выносятся общие модули: `test-support`, `architecture-rules`, `web-starter`.
+Выносятся общие модули: `test-support`, `architecture-rules`, `web-starter`, `kafka-starter`.
 
 **Контрольная точка.** После этапа 2 у проекта уже есть законченный результат: кэш и конкурентность с цифрами. Оцените темп и интерес, прежде чем идти дальше.
 
@@ -132,7 +142,7 @@ TicketHub — платформа продажи билетов на меропр
 
 Архитектура: умеренный hexagonal, rich-модель заказа.
 
-В Docker Compose добавляются Kafka (KRaft) и Keycloak.
+В Docker Compose добавляется Keycloak.
 
 Проектирование:
 
@@ -146,19 +156,20 @@ TicketHub — платформа продажи билетов на меропр
 Реализация:
 
 - [ ] `POST /orders` с Idempotency-Key, включая гонку двух одинаковых запросов
+- [ ] Цены мест: Order синхронно получает их из `/internal` Catalog (без кэша, scope `catalog:prices`) и фиксирует в заказе
 - [ ] Keycloak: realm с self-registration и подтверждением email, роли `customer` и `admin`
-- [ ] Keycloak: пользователь из JWT в Order (userId из `sub`, email из токена сохраняется в заказе), защита эндпоинтов Catalog и Reservation
+- [ ] Keycloak: пользователь из JWT в Order (userId из `sub`, email из токена сохраняется в заказе), защита эндпоинтов Catalog и Reservation шаблонами путей `/api`, `/admin`, `/internal` в `security-starter`; запрос вне групп отклоняется
 - [ ] Межсервисная аутентификация: Order получает свой токен через client credentials, Reservation проверяет scope `reservation:hold`; userId передаётся в теле запроса как данные
 - [ ] Синхронный вызов Order → Reservation с таймаутом, retry и ключом идемпотентности `orderId`; Reservation принимает Idempotency-Key
 - [ ] Все сервисы в двух экземплярах
-- [ ] Outbox на polling publisher, payload в JSON: события Order и `HoldExpired` из Reservation
-- [ ] Воспроизвести нарушение порядка событий одного заказа, когда два экземпляра разбирают outbox через `SKIP LOCKED`
+- [ ] Outbox из Catalog выносится в общий модуль; через него идут события Order и `HoldExpired` из Reservation
+- [ ] Воспроизвести нарушение порядка событий одного заказа, если отключить ShedLock и разбирать outbox двумя экземплярами через `SKIP LOCKED`
 - [ ] Один активный outbox publisher через ShedLock; тест, что порядок событий одного заказа сохраняется
 - [ ] Inbox в Order: отмена заказа по `HoldExpired`; дубль после ребаланса консьюмеров отбрасывается
 - [ ] Добивание зависших заказов по расписанию через ShedLock, переходы — условным `UPDATE … WHERE status = ?`
 - [ ] Готово: Kafka остановлена посреди потока заказов, после рестарта ни одно событие не потеряно и не обработано дважды; остановка одного экземпляра не останавливает публикацию событий
 
-Выносятся общие модули: `security-starter`, `kafka-starter`, `outbox-starter`, `idempotency-starter`.
+Выносятся общие модули: `security-starter`, `outbox-starter`, `idempotency-starter`.
 
 ### Этап 4. Notification — зрелый Kafka (3 недели)
 
@@ -243,8 +254,9 @@ TicketHub — платформа продажи билетов на меропр
 
 ### Этап 8. Gateway, flash sale и производительность (3 недели)
 
-- [ ] Gateway на Spring Cloud Gateway Server Web MVC: маршруты, проверка JWT
+- [ ] Gateway на Spring Cloud Gateway Server Web MVC: маршруты только для `/api/**` и `/admin/**`, проверка JWT; тест, что `/internal/**` снаружи недоступен
 - [ ] TLS на входе: HTTPS на Gateway, внутри Docker-сети — HTTP
+- [ ] gzip на Gateway: `server.compression` для `application/json` и `application/problem+json` от 2 КБ; сервисы ответы не сжимают. Проверка: `GET /api/v1/layouts/{id}` на 50 000 мест уходит клиенту сжатым
 - [ ] Rate limiting: token bucket в Redis
 - [ ] Виртуальная очередь ожидания на Redis sorted set
 - [ ] Сквозной тест «50 000 мест за минуту»
@@ -329,3 +341,6 @@ TicketHub — платформа продажи билетов на меропр
 - [ ] ADR-015. Политика общих модулей: только техника, вынос при втором использовании (этап 0)
 - [ ] ADR-016. Источник read-модели Query: CDC бизнес-таблиц или события outbox (этап 7)
 - [x] [ADR-017. Keycloak как хранилище пользователей, без собственного сервиса пользователей](adr/0017-keycloak-as-user-store.md)
+- [x] [ADR-018. Места мероприятия: список в Catalog, состояние в Reservation](adr/0018-seat-ownership.md)
+- [x] [ADR-019. Композиция вместо наследования классов](adr/0019-composition-over-inheritance.md)
+- [x] [ADR-020. Группы эндпоинтов: public, admin, internal](adr/0020-endpoint-groups.md)
